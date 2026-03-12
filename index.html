@@ -2,68 +2,273 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Video Automation Demo</title>
+  <title>Video Hub</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 20px;
-      background: #111;
-      color: white;
-    }
-    h1 {
-      margin-bottom: 30px;
-      font-size: 2rem;
-    }
-    .video-card {
-      margin-bottom: 40px;
-      background: #222;
-      padding: 20px;
-      border-radius: 12px;
-    }
-    iframe {
-      width: 100%;
-      max-width: 800px;
-      height: 450px;
-      border: none;
-      border-radius: 12px;
-    }
-    .details {
-      margin-top: 10px;
-      font-size: 0.9rem;
-      color: #aaa;
-    }
+    :root { --bg:#0f1115; --panel:#161a22; --text:#e6e6e6; --muted:#9aa3af; --border:#232634; --accent:#4f46e5; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;display:grid;grid-template-columns:340px 1fr;min-height:100vh}
+    .sidebar{background:var(--panel);border-right:1px solid var(--border);height:100vh;position:sticky;top:0;overflow:auto;padding:14px}
+    .brand{display:flex;align-items:center;gap:10px;margin:4px 6px 8px}
+    .brand h1{font-size:16px;margin:0;color:#cbd5e1}
+    .toolbar{display:flex;gap:8px;margin:8px 6px 12px}
+    .btn{font-size:12px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:#0d1017;color:#e6e6e6;cursor:pointer}
+    .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    .btn[disabled]{opacity:.6;cursor:not-allowed}
+    .search{margin:6px}
+    .search input{width:100%;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:#0d1017;color:#e6e6e6}
+    .list{display:grid;gap:6px;margin-top:10px}
+    .item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border-radius:8px;border:1px solid transparent;background:transparent;cursor:pointer}
+    .item:hover{background:#1b2130;border-color:#1f2433}
+    .item.active{background:#1b1f2d;border-color:var(--accent)}
+    .title{font-size:14px}
+    .meta{font-size:11px;color:var(--muted);margin-top:2px}
+    .badge{font-size:10px;padding:4px 7px;border-radius:999px;border:1px solid var(--border);text-transform:uppercase;letter-spacing:.02em}
+    .badge.new{background:#1f2937;color:#93c5fd;border-color:#1e293b}
+    .badge.tested{background:#1f2a29;color:#6ee7b7;border-color:#1e3a34}
+    .badge.deployed{background:#261f34;color:#c4b5fd;border-color:#2a1f3c}
+    .drag{font-size:14px;color:#6b7280}
+    .content{padding:20px}
+    .header{margin-bottom:12px}
+    .header h2{margin:0 0 6px 0;font-size:22px}
+    .filename{margin:0;color:var(--muted);font-size:13px}
+    .editor{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 16px}
+    .editor input,.editor select{padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:#0d1017;color:#e6e6e6}
+    .player{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;max-width:1100px}
+    iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:8px;background:#000}
+    .empty{color:var(--muted);padding:24px}
+    @media(max-width:900px){body{grid-template-columns:1fr}.sidebar{height:auto;position:relative}}
   </style>
 </head>
 <body>
+  <aside class="sidebar">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="#6366f1" aria-hidden="true"><path d="M12 2l4 7h-8l4-7zm0 20l-4-7h8l-4 7zM2 12l7-4v8l-7-4zm20 0l-7 4V8l7 4z"/></svg>
+      <h1>Videos</h1>
+    </div>
 
-  <h1>Video Automation Demo</h1>
-  <div id="videos">Loading videos...</div>
+    <div class="toolbar">
+      <button class="btn" id="editToggle">Enter Edit</button>
+      <button class="btn primary" id="saveBtn" disabled>Save</button>
+    </div>
+
+    <div class="search"><input id="search" type="search" placeholder="Search title…"></div>
+    <div id="list" class="list"></div>
+  </aside>
+
+  <main class="content">
+    <div class="header">
+      <h2 id="hTitle">Loading…</h2>
+      <p class="filename" id="hFilename"></p>
+    </div>
+
+    <div class="editor" id="editor" style="display:none">
+      <input id="titleInput" placeholder="Title">
+      <select id="statusSelect">
+        <option value="">(no tag)</option>
+        <option value="new">new</option>
+        <option value="tested">tested</option>
+        <option value="deployed">deployed</option>
+      </select>
+      <span class="drag">Tip: drag titles in the sidebar to reorder</span>
+    </div>
+
+    <section class="player" id="player">
+      <div id="empty" class="empty">Select a video from the left.</div>
+      <iframe id="iframe" src="" allow="autoplay; fullscreen" allowfullscreen hidden></iframe>
+    </section>
+  </main>
 
   <script>
-    async function loadVideos() {
-      const url = "https://raw.githubusercontent.com/ikmalnajmione9/video-automation-demo/main/videos.json";
-      const res = await fetch(url);
-      const videos = await res.json();
+    // === CONFIG ===
+    const RAW_JSON = "https://raw.githubusercontent.com/ikmalnajmione9/video-automation-demo/main/videos.json";
+    const SAVE_API = "/api/updateVideos"; // your Vercel serverless function (same domain)
+    const ALLOWED = new Set(["new","tested","deployed"]);
 
-      const container = document.getElementById("videos");
-      container.innerHTML = "";
+    // === STATE ===
+    let videos = [];
+    let selectedId = null;
+    let isEdit = false;
+    let dirty = false;
+    let adminSecret = null;
 
-      videos.forEach(v => {
-        container.innerHTML += `
-          <div class="video-card">
-            <h3>${v.name}</h3>
-            <iframe src="${v.url}" allow="autoplay"></iframe>
-            <div class="details">
-              Google Drive ID: ${v.driveFileId}<br>
-              Uploaded: ${new Date(v.publishedAt).toLocaleString()}
-            </div>
-          </div>
-        `;
+    // === UTILS ===
+    function deriveTitle(name="") {
+      return name.replace(/\.[^.]+$/, "")
+                 .replace(/[-_]+/g," ")
+                 .replace(/\s+/g," ")
+                 .trim()
+                 .replace(/\b\w/g,c=>c.toUpperCase());
+    }
+    function byId(id){ return videos.find(v=>v.driveFileId===id); }
+    function setUrlId(id){ const u=new URL(location.href); u.searchParams.set("id",id); history.replaceState(null,"",u.toString()); }
+
+    // === RENDER SIDEBAR LIST ===
+    function renderList(activeId){
+      const list = document.getElementById("list");
+      const q = (document.getElementById("search").value || "").toLowerCase();
+      list.innerHTML = "";
+
+      videos.forEach((v) => {
+        const title = (v.title && v.title.trim()) || deriveTitle(v.name);
+        const searchable = (title + " " + v.name).toLowerCase();
+        if(!searchable.includes(q)) return;
+
+        const row = document.createElement("div");
+        row.className = "item" + (v.driveFileId===activeId ? " active" : "");
+        row.dataset.id = v.driveFileId;
+        row.draggable = isEdit; // drag only in edit mode
+        row.addEventListener("click", () => select(v.driveFileId));
+
+        // drag & drop handlers
+        row.addEventListener("dragstart", ev => {
+          ev.dataTransfer.setData("text/plain", v.driveFileId);
+          ev.dataTransfer.effectAllowed = "move";
+        });
+        row.addEventListener("dragover", ev => { if(isEdit){ ev.preventDefault(); ev.dataTransfer.dropEffect="move"; } });
+        row.addEventListener("drop", ev => {
+          if(!isEdit) return;
+          ev.preventDefault();
+          const fromId = ev.dataTransfer.getData("text/plain");
+          const toId = v.driveFileId;
+          if(fromId && toId && fromId!==toId){
+            const fromIdx = videos.findIndex(x=>x.driveFileId===fromId);
+            const toIdx   = videos.findIndex(x=>x.driveFileId===toId);
+            const [moved] = videos.splice(fromIdx,1);
+            videos.splice(toIdx,0,moved);
+            dirty = true;
+            renderList(selectedId);
+          }
+        });
+
+        const left = document.createElement("div");
+        left.style.flex="1";
+        left.innerHTML = `<div class="title">${title}</div><div class="meta">${v.name}</div>`;
+
+        const st = (v.status || "").toLowerCase();
+        const badge = document.createElement("span");
+        badge.className = "badge" + (st?(" "+st):"");
+        badge.textContent = st || " ";
+        row.append(left, badge);
+        list.appendChild(row);
       });
+
+      // enable/disable SAVE button by dirty flag
+      document.getElementById("saveBtn").disabled = !dirty;
     }
 
-    loadVideos();
+    // === RENDER RIGHT PANEL ===
+    function renderRight(){
+      const v = byId(selectedId);
+      const titleText = v ? (v.title && v.title.trim()) || deriveTitle(v.name) : "Select a video";
+      document.getElementById("hTitle").textContent = titleText;
+      document.getElementById("hFilename").textContent = v ? v.name : "";
+
+      const frame = document.getElementById("iframe");
+      const empty = document.getElementById("empty");
+      if(v){
+        frame.src = v.url; // Drive /preview
+        frame.hidden = false;
+        empty.style.display = "none";
+
+        // bind editor inputs to selected
+        document.getElementById("titleInput").value = v.title || "";
+        document.getElementById("statusSelect").value = (v.status || "");
+      } else {
+        frame.hidden = true;
+        empty.style.display = "block";
+      }
+    }
+
+    function select(id){
+      selectedId = id;
+      setUrlId(id);
+      renderList(id);
+      renderRight();
+    }
+
+    // === EDIT MODE ===
+    function toggleEdit(){
+      isEdit = !isEdit;
+      document.getElementById("editToggle").textContent = isEdit ? "Exit Edit" : "Enter Edit";
+      document.getElementById("editor").style.display = isEdit ? "flex" : "none";
+      renderList(selectedId);
+    }
+
+    function bindEditor(){
+      document.getElementById("titleInput").addEventListener("input", e=>{
+        const v = byId(selectedId); if(!v) return;
+        v.title = e.target.value;
+        dirty = true;
+        renderList(selectedId); // reflect live change
+      });
+
+      document.getElementById("statusSelect").addEventListener("change", e=>{
+        const v = byId(selectedId); if(!v) return;
+        const val = (e.target.value || "").toLowerCase();
+        v.status = ALLOWED.has(val) ? val : "";
+        dirty = true;
+        renderList(selectedId);
+      });
+
+      document.getElementById("search").addEventListener("input", ()=>renderList(selectedId));
+      document.getElementById("editToggle").addEventListener("click", toggleEdit);
+      document.getElementById("saveBtn").addEventListener("click", save);
+    }
+
+    async function save(){
+      if(!dirty){ alert("Nothing to save."); return; }
+      if(!adminSecret){
+        adminSecret = prompt("Enter admin secret to save changes:");
+        if(!adminSecret) return;
+      }
+      try{
+        const res = await fetch(SAVE_API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminSecret}` },
+          body: JSON.stringify({ videos })
+        });
+        if(!res.ok){
+          const txt = await res.text();
+          alert("Save failed: " + txt);
+          return;
+        }
+        dirty = false;
+        document.getElementById("saveBtn").disabled = true;
+        alert("Saved! Vercel will redeploy automatically.");
+      }catch(err){
+        alert("Network error: " + err);
+      }
+    }
+
+    // === INIT ===
+    async function main(){
+      const rsp = await fetch(RAW_JSON, { cache: "no-store" });
+      videos = await rsp.json();
+
+      // ensure fields exist
+      videos = videos.map(v => ({
+        ...v,
+        title: (v.title ?? ""),
+        status: (v.status ?? "")
+      }));
+
+      // pick initial selection
+      const url = new URL(location.href);
+      const want = url.searchParams.get("id");
+      const first = want && videos.find(x=>x.driveFileId===want) ? want : (videos[0]?.driveFileId || null);
+
+      bindEditor();
+      select(first);
+      renderList(first);
+      renderRight();
+    }
+
+    main().catch(err=>{
+      console.error(err);
+      document.getElementById("hTitle").textContent = "Load error";
+      document.getElementById("empty").textContent = "Could not load videos.json";
+    });
   </script>
 </body>
 </html>
