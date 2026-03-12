@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write            # allow this workflow to commit to the repo
 
+concurrency:
+  group: videos-json
+  cancel-in-progress: true
+
 jobs:
   sync:
     runs-on: ubuntu-latest
