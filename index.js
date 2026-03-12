@@ -1,59 +1,112 @@
-// index.js — Drive (read-only) → GitHub JSON (no copying, no billing)
+// index.js — Final (batch commit, conflict-safe, preserves editorial fields)
+// ---------------------------------------------------------------
+// REQUIREMENTS
+//   npm i googleapis axios
+// ENV
+//   Local: set GITHUB_PAT (if you want to run locally), and place demo-service-key.json beside this file
+//   GitHub Actions: we use GITHUB_TOKEN injected by Actions, and write the key from repo secret
+// ---------------------------------------------------------------
+
 const { google } = require('googleapis');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
 
-// ======= REQUIRED: fill these =======
-const SOURCE_DRIVE_FOLDER_ID = '1JTrOol-Zskge6zRC-1dbJ86bplocgFhW'; // your source folder (set to "Anyone with the link: Viewer")
+// ====== CONFIG: fill these once ======
+const SOURCE_DRIVE_FOLDER_ID = process.env.SOURCE_DRIVE_FOLDER_ID || 'YOUR_SOURCE_FOLDER_ID';
 
-const GITHUB_REPO_OWNER = 'ikmalnajmione9';
-const GITHUB_REPO_NAME  = 'video-automation-demo';
-const GITHUB_JSON_PATH  = 'videos.json';
+const GITHUB_REPO_OWNER = process.env.GITHUB_REPO_OWNER || 'ikmalnajmione9';
+const GITHUB_REPO_NAME  = process.env.GITHUB_REPO_NAME  || 'video-automation-demo';
+const GITHUB_JSON_PATH  = process.env.GITHUB_JSON_PATH  || 'videos.json';
 
-// Replace the hardcoded PAT with the GitHub Actions token:
-const GITHUB_PAT = process.env.GITHUB_TOKEN;
+// Prefer Actions token; fall back to local PAT for local testing
+const GITHUB_PAT = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
 
-const SERVICE_KEY_PATH  = path.join(__dirname, 'demo-service-key.json');
-// ====================================
+// Service account key JSON path (Actions writes this file to the repo root)
+const SERVICE_KEY_PATH = path.join(__dirname, 'demo-service-key.json');
 
-// Google Auth with Service Account (read-only to Drive)
+// ---------------------------------------------------------------
+// Google Drive (service account; read-only)
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_KEY_PATH,
   scopes: ['https://www.googleapis.com/auth/drive.readonly'],
 });
 const drive = google.drive({ version: 'v3', auth });
 
-const PROCESSED_LOG = path.join(__dirname, 'processed.txt');
+// GitHub helpers
+const ghHeaders = {
+  Authorization: `Bearer ${GITHUB_PAT}`,
+  Accept: 'application/vnd.github.v3+json',
+  'User-Agent': 'video-automation-script'
+};
 
-async function getProcessed() {
+async function ghGetJson(owner, repo, filePath) {
   try {
-    return new Set((await fs.readFile(PROCESSED_LOG, 'utf8')).split('\n').filter(Boolean));
-  } catch {
-    return new Set();
+    const { data } = await axios.get(
+      `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
+      { headers: ghHeaders }
+    );
+    const sha = data.sha;
+    let decoded = Buffer.from(data.content || '', 'base64').toString('utf8');
+    if (decoded.charCodeAt(0) === 0xfeff) decoded = decoded.slice(1);
+    let json = [];
+    try { json = JSON.parse(decoded); } catch { json = []; }
+    if (!Array.isArray(json)) json = [];
+    return { json, sha };
+  } catch (e) {
+    if (e.response?.status === 404) return { json: [], sha: undefined }; // first run
+    throw e;
   }
 }
 
-// List new videos in the source folder
-async function listNewVideos() {
-  const query = [
+async function ghPutJson(owner, repo, filePath, json, sha, message) {
+  const content = Buffer.from(JSON.stringify(json, null, 2)).toString('base64');
+  await axios.put(
+    `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
+    { message, content, sha },
+    { headers: ghHeaders }
+  );
+}
+
+// ---------------------------------------------------------------
+// Utilities
+function niceTitle(name = '') {
+  return name
+    .replace(/\.[^.]+$/, '')      // remove extension
+    .replace(/[-_]+/g, ' ')       // dashes/underscores -> spaces
+    .replace(/\s+/g, ' ')         // collapse spaces
+    .trim()
+    .replace(/\b\w/g, c => c.toUpperCase()); // Title Case
+}
+
+function isLikelyVideo(file) {
+  // Accept if Drive marks as video/* or filename looks like typical video
+  if ((file.mimeType || '').startsWith('video/')) return true;
+  const n = (file.name || '').toLowerCase();
+  return /\.(mp4|mov|mkv|webm|avi|m4v|wmv)$/i.test(n);
+}
+
+// ---------------------------------------------------------------
+// Drive accessors
+async function listDriveVideos() {
+  // Use a broad query (handles odd mimeTypes) and filter in JS for video-ish files
+  const q = [
     `'${SOURCE_DRIVE_FOLDER_ID}' in parents`,
-    `mimeType contains 'video/'`,
-    `trashed = false`,
+    `trashed = false`
   ].join(' and ');
 
   const { data } = await drive.files.list({
-    q: query,
+    q,
     fields: 'files(id, name, mimeType, modifiedTime)',
     pageSize: 1000,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
   });
 
-  return data.files || [];
+  const files = (data.files || []).filter(isLikelyVideo);
+  return files;
 }
 
-// Build preview + helpful links for an existing Drive file
 async function getFileLinks(fileId, fallbackName) {
   const { data: meta } = await drive.files.get({
     fileId,
@@ -68,130 +121,128 @@ async function getFileLinks(fileId, fallbackName) {
     name: meta.name || fallbackName,
     previewUrl,
     webViewLink: meta.webViewLink,
-    webContentLink: meta.webContentLink, // direct download link
+    webContentLink: meta.webContentLink,
     thumbnail: meta.thumbnailLink,
   };
 }
 
-async function updateGithubJson(entry) {
-  function niceTitle(name = "") {
-    return name
-      .replace(/\.[^.]+$/, "")       // remove extension
-      .replace(/[-_]+/g, " ")        // dashes/underscores -> spaces
-      .replace(/\s+/g, " ")          // collapse spaces
-      .trim()
-      .replace(/\b\w/g, c => c.toUpperCase()); // Title Case
-  }
-
-  const ghHeaders = {
-    Authorization: `Bearer ${GITHUB_PAT}`,
-    Accept: 'application/vnd.github.v3+json',
-    'User-Agent': 'video-automation-script'
-  };
-
-  let sha;
-  let currentJson = [];
-
-  // 1) Load current videos.json (if exists)
-  try {
-    const { data } = await axios.get(
-      `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/contents/${GITHUB_JSON_PATH}`,
-      { headers: ghHeaders }
-    );
-    sha = data.sha;
-
-    let decoded = Buffer.from(data.content || '', 'base64').toString('utf8');
-    if (decoded.charCodeAt(0) === 0xfeff) decoded = decoded.slice(1);
-    try {
-      const parsed = JSON.parse(decoded);
-      if (Array.isArray(parsed)) currentJson = parsed;
-    } catch {
-      // If broken, start fresh but don’t crash the run
-      currentJson = [];
-    }
-  } catch (e) {
-    if (e.response?.status !== 404) throw e; // 404 means new file; fine
-  }
-
-  // 2) Merge logic (preserve editorial fields)
-  const now = new Date().toISOString();
-  const idx = currentJson.findIndex(v => v.driveFileId === entry.id);
-
-  if (idx >= 0) {
-    // Keep existing editorial fields
-    const prev = currentJson[idx];
-    currentJson[idx] = {
-      ...prev, // title, status, etc remain
-      name: entry.name,
-      url: entry.previewUrl,
-      driveFileId: entry.id,
-      driveWebView: entry.webViewLink,
-      driveDownload: entry.webContentLink,
-      thumbnail: entry.thumbnail,
-      source: 'drive',
-      updatedAt: now
-    };
-  } else {
-    // New item → set default editorial values
-    currentJson.push({
-      title: niceTitle(entry.name),
-      status: 'new',
-      name: entry.name,
-      url: entry.previewUrl,
-      driveFileId: entry.id,
-      driveWebView: entry.webViewLink,
-      driveDownload: entry.webContentLink,
-      thumbnail: entry.thumbnail,
-      source: 'drive',
-      publishedAt: now
-    });
-  }
-
-  // (Optional) sort newest first by publishedAt
-  currentJson.sort((a, b) => new Date(b.publishedAt || b.updatedAt || 0) - new Date(a.publishedAt || a.updatedAt || 0));
-
-  // 3) Commit back to GitHub
-  await axios.put(
-    `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/contents/${GITHUB_JSON_PATH}`,
-    {
-      message: `Publish video (Drive read-only): ${entry.name}`,
-      content: Buffer.from(JSON.stringify(currentJson, null, 2)).toString('base64'),
-      sha
-    },
-    { headers: ghHeaders }
-  );
-}
-
+// ---------------------------------------------------------------
+// MAIN: batch merge all changes, commit once
 async function processVideos() {
-  const processed = await getProcessed();
-  const files = await listNewVideos();
+  if (!GITHUB_PAT) {
+    throw new Error('Missing GitHub token (GITHUB_TOKEN in Actions or GITHUB_PAT locally).');
+  }
+  if (!SOURCE_DRIVE_FOLDER_ID || SOURCE_DRIVE_FOLDER_ID === 'YOUR_SOURCE_FOLDER_ID') {
+    throw new Error('Set SOURCE_DRIVE_FOLDER_ID (env var or hardcode).');
+  }
 
-  for (const file of files) {
-    if (processed.has(file.id)) continue;
+  // 1) Read current videos.json once
+  const { json: currentJson, sha: baseSha } = await ghGetJson(
+    GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_JSON_PATH
+  );
 
-    console.log(`Publishing (no copy): ${file.name}`);
-    const entry = await getFileLinks(file.id, file.name);
-    await updateGithubJson(entry);
-    console.log(`Updated GitHub videos.json for: ${entry.name}`);
+  // Build a map for fast merge
+  const map = new Map(currentJson.map(v => [v.driveFileId, v]));
+  const beforeLen = currentJson.length;
 
-    await fs.appendFile(PROCESSED_LOG, `${file.id}\n`);
+  // 2) List Drive files; merge in memory
+  const driveFiles = await listDriveVideos();
+  const now = new Date().toISOString();
+
+  // For small change logging (console only)
+  const added = [];
+  const updated = [];
+
+  for (const file of driveFiles) {
+    const links = await getFileLinks(file.id, file.name);
+    const exists = map.get(links.id);
+
+    if (exists) {
+      // Preserve editorial fields (title/status); update technical fields
+      const merged = {
+        ...exists,
+        name: links.name,
+        url: links.previewUrl,
+        driveFileId: links.id,
+        driveWebView: links.webViewLink,
+        driveDownload: links.webContentLink,
+        thumbnail: exists.thumbnail || links.thumbnail,
+        source: 'drive',
+        updatedAt: now
+      };
+      map.set(links.id, merged);
+
+      // mark as updated if something actually changed (simple detect)
+      if (
+        exists.name !== merged.name ||
+        exists.url !== merged.url ||
+        exists.driveDownload !== merged.driveDownload
+      ) updated.push(links.name);
+    } else {
+      // New item → default editorial fields
+      const item = {
+        title: niceTitle(links.name),
+        status: 'new',
+        name: links.name,
+        url: links.previewUrl,
+        driveFileId: links.id,
+        driveWebView: links.webViewLink,
+        driveDownload: links.webContentLink,
+        thumbnail: links.thumbnail,
+        source: 'drive',
+        publishedAt: now
+      };
+      map.set(links.id, item);
+      added.push(links.name);
+    }
+  }
+
+  // 3) Optionally: prune items that no longer exist in the folder (OFF by default)
+  // If you want to remove videos that were removed from the Drive folder, uncomment below:
+  // const driveIds = new Set(driveFiles.map(f => f.id));
+  // for (const id of Array.from(map.keys())) {
+  //   if (!driveIds.has(id)) map.delete(id);
+  // }
+
+  // 4) Build final array & sort newest first
+  const updatedArray = Array.from(map.values())
+    .sort((a, b) => new Date(b.publishedAt || b.updatedAt || 0) - new Date(a.publishedAt || a.updatedAt || 0));
+
+  // 5) Only PUT if the content actually changed
+  const before = JSON.stringify(currentJson);
+  const after  = JSON.stringify(updatedArray);
+
+  if (before !== after) {
+    await ghPutJson(
+      GITHUB_REPO_OWNER,
+      GITHUB_REPO_NAME,
+      GITHUB_JSON_PATH,
+      updatedArray,
+      baseSha,
+      'Publish videos (batch)'
+    );
+
+    // Console log summary for Actions logs
+    const delta = updatedArray.length - beforeLen;
+    console.log('Committed batch update to videos.json');
+    console.log('Added:', added);
+    console.log('Updated:', updated);
+    console.log('Count before:', beforeLen, 'after:', updatedArray.length, 'delta:', delta);
+  } else {
+    console.log('No changes detected; skipped commit.');
   }
 }
 
+// Run when invoked directly
 processVideos()
-  .then(() => console.log('Drive→GitHub (links only) demo complete'))
+  .then(() => console.log('Batch sync complete'))
   .catch(err => {
     console.error(err?.response?.data || err);
     process.exit(1);
   });
 
-// Cloud Functions (optional):
+// (Optional) export for Cloud Functions, if you ever deploy there:
 // exports.demoProcessVideos = async (req, res) => {
-//   try {
-//     await processVideos();
-//     res.status(200).send('Processed');
-//   } catch (err) {
-//     console.error(err?.response?.data || err);
-//     res.status(500).send('Error');
-//   }
+//   try { await processVideos(); res.status(200).send('OK'); }
+//   catch (e) { console.error(e?.response?.data || e); res.status(500).send('ERR'); }
 // };
