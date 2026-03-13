@@ -38,6 +38,7 @@ jobs:
 
       - name: Run sync script
         env:
+          SOURCE_DRIVE_FOLDER_ID: 1JTrOol-Zskge6zRC-1dbJ86bplocgFhW # 👈 put your actual source folder ID here
           # GitHub provides this automatically with write permission because of "permissions: contents: write"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node index.js
